@@ -1,5 +1,5 @@
 using WebDriver
-include("../citation_graph.jl")
+include("citation_graph.jl")
 
 # -------------------------------------------------------------------------------
 # step 1: load citation graph from old data 
@@ -14,7 +14,7 @@ session = Session(wd)
 # -------------------------------------------------------------------------------
 # step 3: iterates through the nodes to be analyzed and update their info 
 k = 0
-for id in citationGraph.toBeAnalyzed
+for id in citationGraph.toBeAnalyzed[k+1:end]
     global session
     global citationGraph
     node = citationGraph.nodes[id]
@@ -30,7 +30,7 @@ for id in citationGraph.toBeAnalyzed
         catch
             ""
         end
-        for i = 1:30
+        for i = 1:6
             if pageState != "complete"
                 sleep(1)
             end
@@ -39,7 +39,14 @@ for id in citationGraph.toBeAnalyzed
     # function switchRoute:
     #   switch the webpage between references and citations 
     function switchRoute(routeName::String)::Bool
-        routesGroup = Element(session, "css selector", "div.routes-group")
+        routesGroup = try 
+            Element(session, "css selector", "div.routes-group")
+        catch
+            nothing
+        end
+        if routesGroup === nothing
+            return false
+        end
         route = Element(routesGroup, "css selector", "ma-call-to-action.au-target.route.active")
         if routeName != element_text(route)
             routes = Elements(routesGroup, "css selector", "ma-call-to-action.au-target.route")
@@ -65,8 +72,26 @@ for id in citationGraph.toBeAnalyzed
             end
             nextPageElem = Element(pager, "css selector", "i.icon-up.right.au-target")
             if nextPageElem !== nothing
+                url = current_url(session)
                 click!(nextPageElem)
                 waitForPageLoaded()
+                resultElement = try
+                    Element(session, "css selector", "div.results")
+                catch
+                    nothing
+                end
+                while resultElement === nothing
+                    navigate!(session, url)
+                    waitForPageLoaded()
+                    nextPageElem = Element(pager, "css selector", "i.icon-up.right.au-target")
+                    click!(nextPageElem)
+                    waitForPageLoaded()
+                    resultElement = try
+                        Element(session, "css selector", "div.results")
+                    catch
+                        nothing
+                    end
+                end
                 return true
             end
         catch
@@ -81,7 +106,7 @@ for id in citationGraph.toBeAnalyzed
             resultElement = Element(session, "css selector", "div.results")
             infoElement = Element(resultElement, "css selector", "div.info.secondary-text")
             infoText = element_text(infoElement)
-            count = parse(Int, split(infoText, "of")[2])
+            count = parse(Int, replace(split(infoText, "of")[2],","=>""))
         catch
         end
         count
@@ -89,7 +114,8 @@ for id in citationGraph.toBeAnalyzed
     # function selectNewestFirst:
     #   ask the webpage to sort the result by order "NEWEST FIRST"
     function selectNewestFirst()
-        try 
+        try
+            url = current_url(session) 
             resultElement = Element(session, "css selector", "div.results")
             dropdownElement = Element(resultElement, "css selector", "div.au-target.ma-dropdown")
             click!(dropdownElement)
@@ -101,9 +127,97 @@ for id in citationGraph.toBeAnalyzed
                 end
             end
             waitForPageLoaded()
+            try
+                Element(session, "css selector", "div.results")
+            catch
+                navigate!(session, url)
+                waitForPageLoaded()
+                selectNewestFirst()
+            end
         catch
         end
     end
+    # function setYearRange()
+    #   When the citations are too many to list (i.e., > 500), we have to use year range filter 
+    #   to narrow down the range (it is very rare a paper has more than 500 citations in a year).
+    #   Therefore, we have to use the following function to set filters on the range of years.
+    # input:
+    #   yearIdx: the index of year range filter, 1 for the oldest valid year of the citations 
+    # output:
+    #   next yearIdx, or 0 if there is no next 
+    function setYearRange(yearIdx::Int)::Int
+        try
+            clearAllElem = try
+                Element(session, "css selector", "ma-call-to-action.clear-all.au-target")
+            catch
+                nothing
+            end
+            if clearAllElem !== nothing 
+                click!(clearAllElem)
+                waitForPageLoaded()
+            end
+            dropdownElem = Element(session, "css selector", "div.au-target.ma-year-range-dropdown")
+            click!(dropdownElem)
+            dropdownElem2 = Element(session, "css selector", "div.au-target.ma-year-range-dropdown.expanded")
+            yearElems = Elements(dropdownElem2, "css selector", "div.au-target.year-item")
+            numYearElems = length(yearElems)
+            click!(yearElems[yearIdx])
+            yearElems = Elements(dropdownElem2, "css selector", "div.au-target.year-item")
+            click!(yearElems[yearIdx])
+            waitForPageLoaded()
+            if yearIdx + 1 <= numYearElems
+                yearIdx + 1
+            else
+                0
+            end
+        catch
+            0
+        end 
+    end
+    # function fetchCites
+    function fetchCites(oldCiteSet::Set{Int}, realNumCites::Int)
+        if realNumCites == 0
+            return
+        end
+        if realNumCites <= 500
+            selectNewestFirst()
+        end
+        for iCite = 1:10:realNumCites
+            resultElement = try
+                Element(session, "css selector", "div.results")
+            catch
+                nothing
+            end
+            if resultElement === nothing
+                break
+            end
+            maCardElements = Elements(resultElement, "css selector", "ma-card.au-target")
+            for maCard in maCardElements
+                titleElement = Element(maCard, "css selector", "a.title")
+                citeID = parse(Int, split(element_attr(titleElement, "href"),"/")[end-1])
+                if citeID ∈ oldCiteSet
+                    continue 
+                end
+                push!(node.cites, citeID)
+                println("new cite $citeID for $id")
+
+                if citeID ∉ keys(citationGraph.nodes)
+                    citeTitle = element_text(titleElement)
+                    yearElements = Elements(maCard, "css selector", "span.year")
+                    citeYear = 0
+                    for elem in yearElements
+                        if element_text(elem) != ""
+                            citeYear = parse(Int, element_text(elem))
+                        end
+                    end
+                    citationGraph.nodes[citeID] = CitationNode(citeID, citeYear, citeTitle, String[], Int[], Int[])
+                end
+            end
+            if !nextPage()
+                break
+            end
+        end
+    end 
 
     # (3.2) navigate to the paper of this node on academic.microsoft.com
     url = "https://academic.microsoft.com/paper/$id/reference"
@@ -118,43 +232,38 @@ for id in citationGraph.toBeAnalyzed
     try
         statsElement = Element(session, "css selector", "div.stats")
         statDataElements = Elements(statsElement, "css selector", "div.count")
-        numRefs = parse(Int64, element_text(statDataElements[1]))
-        numCites = parse(Int64, element_text(statDataElements[2]))
+        numRefs = parse(Int64, replace(element_text(statDataElements[1]),","=>""))
+        numCites = parse(Int64, replace(element_text(statDataElements[2]),","=>""))
     catch
-    end
-    
+    end   
 
     # (3.5) get references from the webpage
     oldRefSet = Set(node.refs)
     if numRefs > 0 && switchRoute("REFERENCES")
         realNumRefs = getResultCount()
         for iRef = 1:10:realNumRefs
-            try
-                resultElement = Element(session, "css selector", "div.results")
-                maCardElements = Elements(resultElement, "css selector", "ma-card.au-target")
-                for maCard in maCardElements
-                    titleElement = Element(maCard, "css selector", "a.title")
-                    refID = parse(Int, split(element_attr(titleElement, "href"),"/")[end-1])
-                    if refID ∈ oldRefSet
-                        continue 
-                    end
-                    push!(node.refs, refID)
-                    println("new ref $refID for $id")
-
-                    if refID ∉ keys(citationGraph.nodes)
-                        refTitle = element_text(titleElement)
-                        yearElements = Elements(maCard, "css selector", "span.year")
-                        refYear = ""
-                        for elem in yearElements
-                            if element_text(elem) != ""
-                                refYear = element_text(elem)
-                            end
-                        end
-                        citationGraph.nodes[refID] = CitationNode(refID, refYear, refTitle, String[], Int[], Int[])
-                    end
+            resultElement = Element(session, "css selector", "div.results")
+            maCardElements = Elements(resultElement, "css selector", "ma-card.au-target")
+            for maCard in maCardElements
+                titleElement = Element(maCard, "css selector", "a.title")
+                refID = parse(Int, split(element_attr(titleElement, "href"),"/")[end-1])
+                if refID ∈ oldRefSet
+                    continue 
                 end
-            catch
-                nothing
+                push!(node.refs, refID)
+                println("new ref $refID for $id")
+
+                if refID ∉ keys(citationGraph.nodes)
+                    refTitle = element_text(titleElement)
+                    yearElements = Elements(maCard, "css selector", "span.year")
+                    refYear = 0
+                    for elem in yearElements
+                        if element_text(elem) != ""
+                            refYear = parse(Int, element_text(elem))
+                        end
+                    end
+                    citationGraph.nodes[refID] = CitationNode(refID, refYear, refTitle, String[], Int[], Int[])
+                end
             end
             if !nextPage()
                 break
@@ -165,39 +274,16 @@ for id in citationGraph.toBeAnalyzed
     # (3.6) get citations from the webpage
     oldCiteSet = Set(node.cites)
     if numCites > 0 && switchRoute("CITED BY")
-        selectNewestFirst()
         realNumCites = getResultCount()
-        for iCite = 1:10:realNumCites
-            try
-                resultElement = Element(session, "css selector", "div.results")
-                maCardElements = Elements(resultElement, "css selector", "ma-card.au-target")
-                for maCard in maCardElements
-                    titleElement = Element(maCard, "css selector", "a.title")
-                    citeID = split(element_attr(titleElement, "href"),"/")[end-1]
-                    if citeID ∈ oldCiteSet
-                        continue 
-                    end
-                    push!(node.cites, citeID)
-                    println("new cite $citeID for $id")
-
-                    if citeID ∉ keys(citationGraph.nodes)
-                        citeTitle = element_text(titleElement)
-                        yearElements = Elements(maCard, "css selector", "span.year")
-                        citeYear = ""
-                        for elem in yearElements
-                            if element_text(elem) != ""
-                                citeYear = element_text(elem)
-                            end
-                        end
-                        citationGraph.nodes[citeID] = CitationNode(citeID, citeYear, citeTitle, String[], Int[], Int[])
-                    end
-                end
-            catch
-                nothing
+        if realNumCites > 500
+            yearIdx = 1
+            while yearIdx > 0
+                yearIdx = setYearRange(yearIdx)
+                realNumCites = getResultCount()
+                fetchCites(oldCiteSet, realNumCites)
             end
-            if !nextPage()
-                break
-            end
+        else
+            fetchCites(oldCiteSet, realNumCites)
         end
     end
 
