@@ -1,11 +1,13 @@
 using HTTP
 using Gumbo
 using Cascadia
-include("../citation_graph.jl")
+include("citation_graph.jl")
+using JLD2
 
 # -------------------------------------------------------------------------------
 # step 1: load citation graph from old data 
-citationGraph = loadCitationGraph(".", "ijcai")
+#citationGraph = loadCitationGraph(".", "ijcai")
+@load "ijcai-citation-graph-new.jld2" citationGraph
 
 # -------------------------------------------------------------------------------
 # step 2: create an ID set to judge whether an ID is of a paper to be analyzed  
